@@ -1,0 +1,190 @@
+---
+title: "knn_class"
+author: "Yuraja Kadari"
+date: "3/23/2021"
+output: html_document
+---
+
+```{r}
+require(tidymodels)
+require(tidyverse)
+```
+
+```{r}
+employee_data <- read_rds('C:/Users/Lenovo/Downloads/knn-algorithm/employee_data.rds')
+employee_data <- employee_data %>% 
+                 mutate(left_company = factor(left_company,
+                                              levels = c('Yes', 'No')))
+employee_data
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+
+# Plot the distribution of the outcome variable `left_company`
+ggplot(employee_data, aes(x = left_company, fill = left_company)) +
+  geom_bar() +
+  labs(title = "Distribution of Left Company", x = "Left Company", y = "Count")
+
+# Plot the distribution of the numeric predictor variables
+employee_data %>%
+  select(salary, yrs_at_company,previous_companies,weekly_hours,miles_from_home) %>%
+  gather() %>%
+  mutate(value = as.numeric(value)) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 20) +
+  facet_wrap(~ key, scales = "free_x") +
+  labs(title = "Distribution of Numeric Predictor Variables")
+
+# Plot the boxplots of the numeric predictor variables by the outcome variable
+employee_data %>%
+  select(salary, yrs_at_company, previous_companies, weekly_hours, left_company, miles_from_home) %>%
+  gather(key, value, -left_company) %>%
+  ggplot(aes(x = left_company, y = value, fill = left_company)) +
+  geom_boxplot() +
+  facet_wrap(~ key, scales = "free_y") +
+  labs(title = "Boxplots of Numeric Predictor Variables by Left Company", x = "Left Company", y = "Value")
+
+```
+## Data split
+
+```{r}
+employee_data%>%group_by(left_company)%>%summarise(n())
+
+set.seed(3145)
+employee_split<-initial_split(employee_data, strata= left_company)
+
+employee_training <- employee_split%>%training()
+employee_testing <- employee_split%>%testing()
+
+
+employee_testing%>%group_by(left_company) %>% summarise(n())
+```
+
+## Create Model 
+
+### Create Recipe
+```{r}
+employee_recipe<- recipe(left_company~., data=employee_training)%>%
+                  step_range(all_numeric(), -all_outcomes())%>%
+                  step_dummy(all_nominal(), -all_outcomes())%>%
+                  step_nzv(all_predictors())
+```
+
+
+```{r}
+employee_training%>%head()
+employee_recipe%>%prep()%>%bake(employee_training%>%head())
+```
+
+
+### Add model 
+```{r}
+install.packages('kknn')
+knn_model<-nearest_neighbor(neighbors=5) %>% 
+           set_engine('kknn') %>%
+           set_mode('classification')
+
+```
+
+### create workflow
+
+```{r}
+knn_workflow<- workflow()%>%add_recipe(employee_recipe)%>%
+                            add_model(knn_model)
+```
+
+
+```{r}
+model_fit <-knn_workflow%>%fit(data=employee_training)
+```
+
+```{r}
+test_result=predict(model_fit, new_data= employee_testing)%>%bind_cols(employee_testing%>%select(left_company))
+
+#test_result=test_result%>%mutate(left_company=factor(left_company, levels=c('No','Yes')))
+
+conf_mat(test_result, truth=left_company, estimate=.pred_class)
+```
+
+
+## Parameter Tuning
+> 7 Neighbors may not give us the optimal results. We will tune our model by trying different k values 
+
+```{r}
+employee_folds<-vfold_cv(employee_training, v = 9)
+
+```
+
+
+```{r}
+knn_model2<-nearest_neighbor(neighbors=tune()) %>% 
+           set_engine('kknn') %>%
+           set_mode('classification')
+
+```
+
+```{r}
+knn_workflow2<-workflow()%>%
+               add_model(knn_model2)%>%
+                add_recipe(employee_recipe)
+```
+
+```{r}
+k_grid<-tibble(neighbors=c(1:10, 20, 30, 50 ,75, 100, 125,150))
+```
+
+```{r}
+set.seed(3145)
+
+knn_tuning<-knn_workflow2%>%
+            tune_grid(resamples= employee_folds, grid=k_grid)
+```
+
+> Best k value
+
+```{r}
+knn_tuning%>%show_best('accuracy')
+```
+
+```{r}
+best_k <-knn_tuning%>%select_best(metric='accuracy')
+```
+
+```{r}
+final_knn_wf<-knn_workflow2%>%finalize_workflow(best_k)
+```
+
+```{r}
+last_fit_knn<-final_knn_wf%>%last_fit(split=employee_split)
+```
+
+```{r}
+last_fit_knn%>%collect_metrics()
+```
+
+```{r}
+test_results2<-last_fit_knn%>%collect_predictions()
+
+
+conf_mat(test_results2, truth = left_company, estimate=.pred_class)
+```
+
+```{r}
+
+library(pROC)
+
+# calculate ROC curve
+roc_curve <- roc(test_results2$left_company, test_results2$.pred_Yes)
+
+# plot ROC curve
+plot(roc_curve, main = "ROC Curve")
+
+# calculate AUC
+auc(roc_curve)
+
+```
+
+
